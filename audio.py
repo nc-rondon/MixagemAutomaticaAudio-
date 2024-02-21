@@ -1,125 +1,79 @@
-"""
-    Notebook for streaming data from a microphone in realtime
-
-    audio is captured using pyaudio
-    then converted from binary data to ints using struct
-    then displayed using matplotlib
-
-    scipy.fftpack computes the FFT
-
-    if you don't have pyaudio, then run
-
-    >>> pip install pyaudio
-
-    note: with 2048 samples per chunk, I'm getting 20FPS
-    when also running the spectrum, its about 15FPS
-"""
-import matplotlib.pyplot as plt
-import numpy as np
 import pyaudio
-from pyqtgraph.Qt import QtGui, QtCore
-import pyqtgraph as pg
-import struct
-from scipy.fftpack import fft
-import sys
-import time
+import numpy as np
 
+# Parâmetros do Stream
+CHUNK = 1024 * 3  # Tamanho do buffer de áudio
+FORMAT = pyaudio.paInt16  # Formato de dados do áudio
+CHANNELS = 1  # Número de canais (mono)
+RATE = 100000  # Frequência de amostragem
 
-class AudioStream(object):
-    def __init__(self):
+# Limites de intensidade
+INTENSIDADE_MIN = -500  # Limite inferior (volume baixo)
+INTENSIDADE_MAX = 30000  # Limite superior (volume alto)
 
-        # stream constants
-        self.CHUNK = 1024 * 2
-        self.FORMAT = pyaudio.paInt16
-        self.CHANNELS = 1
-        self.RATE = 44100
-        self.pause = False
+# Fator de Ganho
+GANHO_AJUSTE = 10000  # Ajusta a sensibilidade do ajuste automático
 
-        # stream object
-        self.p = pyaudio.PyAudio()
-        self.stream = self.p.open(
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.RATE,
-            input=True,
-            output=True,
-            frames_per_buffer=self.CHUNK,
-        )
-        self.init_plots()
-        self.start_plot()
+# Cria objeto PyAudio e Stream
+p = pyaudio.PyAudio()
+stream = p.open(
+    format=FORMAT,
+    channels=CHANNELS,
+    rate=RATE,
+    input=True,
+    output=True,
+    frames_per_buffer=CHUNK,
+)
 
-    def init_plots(self):
+def ajustar_intensidade(data):
+    """
+    Ajusta a intensidade do áudio em tempo real.
 
-        # x variables for plotting
-        x = np.arange(0, 2 * self.CHUNK, 2)
-        xf = np.linspace(0, self.RATE, self.CHUNK)
+    Args:
+        data: bytes - Dados de áudio brutos do microfone.
 
-        # create matplotlib figure and axes
-        self.fig, (ax1, ax2) = plt.subplots(2, figsize=(15, 7))
-        self.fig.canvas.mpl_connect('button_press_event', self.onClick)
+    Returns:
+        bytes - Dados de áudio ajustados para o stream de saída.
+    """
+    # Converte dados binários em array NumPy
+    data_np = np.frombuffer(data, dtype=np.int16)
 
-        # create a line object with random data
-        self.line, = ax1.plot(x, np.random.rand(self.CHUNK), '-', lw=2)
+    # Calcula a intensidade média do buffer
+    intensidade_media = np.mean(np.abs(data_np))
 
-        # create semilogx line for spectrum
-        self.line_fft, = ax2.semilogx(
-            xf, np.random.rand(self.CHUNK), '-', lw=2)
+    # Ajusta o ganho de acordo com a intensidade média
+    if intensidade_media < INTENSIDADE_MIN:
+        ganho = GANHO_AJUSTE * (INTENSIDADE_MIN - intensidade_media)
+    elif intensidade_media > INTENSIDADE_MAX:
+        ganho = -GANHO_AJUSTE * (intensidade_media - INTENSIDADE_MAX)
+    else:
+        ganho = 0
 
-        # format waveform axes
-        ax1.set_title('AUDIO WAVEFORM')
-        ax1.set_xlabel('samples')
-        ax1.set_ylabel('volume')
-        ax1.set_ylim(0, 255)
-        ax1.set_xlim(0, 2 * self.CHUNK)
-        plt.setp(
-            ax1, yticks=[0, 128, 255],
-            xticks=[0, self.CHUNK, 2 * self.CHUNK],
-        )
-        plt.setp(ax2, yticks=[0, 1],)
+    # Aplica o ganho ao buffer de áudio
+    data_ajustada = data_np * (1 + ganho)
 
-        # format spectrum axes
-        ax2.set_xlim(20, self.RATE / 2)
+    # Converte o array NumPy de volta para bytes
+    data_out = data_ajustada.astype(np.int16).tobytes()
 
-        # show axes
-        thismanager = plt.get_current_fig_manager()
-        thismanager.window.setGeometry(5, 120, 1910, 1070)
-        plt.show(block=False)
+    return data_out
 
-    def start_plot(self):
+try:
+    while True:
+        # Lê dados do microfone
+        data = stream.read(CHUNK)
 
-        print('stream started')
-        frame_count = 0
-        start_time = time.time()
+        # Ajusta a intensidade do áudio em tempo real
+        data_ajustada = ajustar_intensidade(data)
 
-        while not self.pause:
-            data = self.stream.read(self.CHUNK)
-            data_int = struct.unpack(str(2 * self.CHUNK) + 'B', data)
-            data_np = np.array(data_int, dtype='b')[::2] + 128
+        # Escreve os dados ajustados na saída
+        stream.write(data_ajustada)
 
-            self.line.set_ydata(data_np)
+except KeyboardInterrupt:
+    print("Interrompido pelo usuário...")
 
-            # compute FFT and update line
-            yf = fft(data_int)
-            self.line_fft.set_ydata(
-                np.abs(yf[0:self.CHUNK]) / (128 * self.CHUNK))
+# Fecha o Stream e termina o PyAudio
+stream.stop_stream()
+stream.close()
+p.terminate()
 
-            # update figure canvas
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-            frame_count += 1
-
-        else:
-            self.fr = frame_count / (time.time() - start_time)
-            print('average frame rate = {:.0f} FPS'.format(self.fr))
-            self.exit_app()
-
-    def exit_app(self):
-        print('stream closed')
-        self.p.close(self.stream)
-
-    def onClick(self, event):
-        self.pause = True
-
-
-if __name__ == '__main__':
-    AudioStream()
+print("Processo finalizado.")
